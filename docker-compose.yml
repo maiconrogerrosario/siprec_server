@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  sip-server:
+    build: .
+    container_name: sip_udp_answer
+    restart: unless-stopped
+    network_mode: "host"  # importante para UDP SIP (evita NAT)
+    volumes:
+      - .:/app
+    command: ["python3", "sip_udp_answer.py"]
