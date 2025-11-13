@@ -5,14 +5,12 @@ sip_udp_siprec.py
 Servidor SIP mínimo (UDP) para SIPREC:
  - Escuta em 0.0.0.0:5060
  - Responde INVITE com 200 OK multipart/mixed (dois SDP)
- - Responde OPTIONS com 200 OK
+ - Responde OPTIONS com 200 OK (com rport/received reordenados)
  - Aguarda ACK
  - Após 10s envia BYE
  - Trata Require: SIPREC
-
-Uso:
-  sudo python3 sip_udp_siprec.py
 """
+
 import socket
 import threading
 import time
@@ -22,7 +20,12 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 5060
 CRLF = "\r\n"
 
+# -----------------------------------------------------------
+# 📦 Funções auxiliares
+# -----------------------------------------------------------
+
 def parse_sip(msg):
+    """Converte texto SIP em dicionário estruturado."""
     lines = msg.split(CRLF)
     start = lines[0]
     headers = {}
@@ -39,10 +42,86 @@ def parse_sip(msg):
         i += 1
     return {"start": start, "headers": headers, "body": body, "raw": msg}
 
+
 def make_tag():
+    """Gera um tag aleatório para To: ou Call-ID."""
     return str(random.randint(10000, 99999))
 
-def build_200_ok_siprec(invite, server_ip, media_port1=8000, media_port2=8002):
+
+# -----------------------------------------------------------
+# 🧩 Função para reordenar parâmetros do cabeçalho Via
+# -----------------------------------------------------------
+def reorder_via_params(via_line):
+    """
+    Reordena parâmetros do cabeçalho Via para deixar em ordem:
+    rport, received, branch.
+    """
+    try:
+        parts = via_line.split(";", 1)
+        base = parts[0]
+        if len(parts) == 1:
+            return via_line
+
+        params = parts[1].split(";")
+        parsed = {}
+        others = []
+        for p in params:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                parsed[k.strip()] = v.strip()
+            else:
+                others.append(p.strip())
+
+        # Define a ordem desejada
+        order = ["rport", "received", "branch"]
+
+        reordered = []
+        for key in order:
+            if key in parsed:
+                reordered.append(f"{key}={parsed[key]}")
+
+        # Adiciona os parâmetros que sobraram
+        for p in params:
+            k = p.split("=")[0].strip() if "=" in p else p.strip()
+            if k not in order:
+                reordered.append(p.strip())
+
+        via_reordered = f"{base};" + ";".join(reordered)
+        return via_reordered
+    except Exception:
+        return via_line
+
+
+# -----------------------------------------------------------
+# 🧠 Construtores de respostas SIP
+# -----------------------------------------------------------
+
+
+def build_100_trying(invite):
+    hdr = invite["headers"]
+    via = hdr.get("Via", "")
+    from_hdr = hdr.get("From", "")
+    to_hdr = hdr.get("To", "")
+    call_id = hdr.get("Call-ID", "")
+    cseq = hdr.get("CSeq", "")
+
+    resp = [
+        "SIP/2.0 100 Trying",
+        f"Via: {via}",
+        f"From: {from_hdr}",
+        f"To: {to_hdr}",
+        f"Call-ID: {call_id}",
+        f"CSeq: {cseq}",
+        "Content-Length: 0",
+        ""
+    ]
+    return CRLF.join(resp)
+
+
+
+
+def build_200_ok_siprec(invite, server_ip, media_port1=1000, media_port2=1001):
+    """Monta resposta 200 OK com multipart SDP (SIPREC)."""
     hdr = invite["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
@@ -111,7 +190,9 @@ def build_200_ok_siprec(invite, server_ip, media_port1=8000, media_port2=8002):
     ]
     return CRLF.join(resp_lines)
 
-def build_200_ok_options(options, server_ip):
+
+def build_200_ok_options(options, server_ip, addr=None):
+    """Monta resposta 200 OK para OPTIONS (com rport e received adicionados e ordenados)."""
     hdr = options["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
@@ -120,20 +201,38 @@ def build_200_ok_options(options, server_ip):
     cseq = hdr.get("CSeq", "")
     contact = hdr.get("Contact", f"<sip:{server_ip}>")
 
+    # 🧩 Se o cliente enviou rport, adicionamos os valores reais
+    if "rport" in via:
+        ip, port = addr if addr else ("127.0.0.1", 5060)
+        # Remove possíveis duplicados
+        via = via.replace("rport", f"rport={port};received={ip}")
+
+    # 🧠 Agora reordenamos para rport, received, branch
+    via = reorder_via_params(via)
+
+    # 🧱 Monta resposta SIP padrão
     resp = [
         "SIP/2.0 200 OK",
-        via,
-        from_hdr,
-        to_hdr,
+        f"Via: {via}",
+        f"From: {from_hdr}",
+        f"To: {to_hdr};tag={make_tag()}",
         f"Call-ID: {call_id}",
-        cseq,
+        f"CSeq: {cseq}",
         f"Contact: {contact}",
+        "Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, NOTIFY, MESSAGE, SUBSCRIBE, INFO",
+        "Accept: application/sdp",
+        "Accept-Encoding: gzip",
+        "Accept-Language: en, pt-BR",
+        "Supported: replaces, timer, 100rel, norefersub",
+        "Server: Python-SIP-Responder/1.0",
         "Content-Length: 0",
         ""
     ]
     return CRLF.join(resp)
 
+
 def build_bye(invite, server_ip):
+    """Monta uma requisição BYE."""
     hdr = invite["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
@@ -156,6 +255,11 @@ def build_bye(invite, server_ip):
     ]
     return CRLF.join(resp)
 
+
+# -----------------------------------------------------------
+# 🚀 Classe principal do servidor
+# -----------------------------------------------------------
+
 class SIPServer:
     def __init__(self, host=LISTEN_HOST, port=LISTEN_PORT):
         self.host = host
@@ -168,13 +272,9 @@ class SIPServer:
     def start(self):
         while True:
             data, addr = self.sock.recvfrom(65535)
-            try:
-                text = data.decode("utf-8", errors="ignore")
-            except Exception:
-                text = data.decode("latin-1", errors="ignore")
+            text = data.decode("utf-8", errors="ignore")
             print(f"\n--- Received from {addr} ---\n{text}\n--- end ---\n")
-            thr = threading.Thread(target=self.handle_message, args=(text, addr), daemon=True)
-            thr.start()
+            threading.Thread(target=self.handle_message, args=(text, addr), daemon=True).start()
 
     def handle_message(self, text, addr):
         sip = parse_sip(text)
@@ -184,28 +284,26 @@ class SIPServer:
             print("➡ INVITE detected")
             server_ip = self.get_external_ip()
 
-            # Tratar SIPREC
-            require = sip["headers"].get("Require","")
-            if "SIPREC" in require.upper():
-                print("   ➡ Require: SIPREC detected, enviando multipart SDP")
-                ok = build_200_ok_siprec(sip, server_ip)
-            else:
-                print("   ➡ Sem Require SIPREC, enviando SDP normal")
-                ok = build_200_ok_siprec(sip, server_ip)  # mesmo SDP duplo por padrão
+            # ✅ Envia 100 Trying primeiro
+            trying = build_100_trying(sip)
+            self.sock.sendto(trying.encode("utf-8"), addr)
+            print(f"\n--- Enviando 100 Trying ---\n{trying}\n--- end ---\n")
 
+
+            require = sip["headers"].get("Require","")
+            ok = build_200_ok_siprec(sip, server_ip)
+            print(f"\n--- Enviando resposta OPTIONS ---\n{ok}\n--- end ---\n")
             self.sock.sendto(ok.encode("utf-8"), addr)
             call_id = sip["headers"].get("Call-ID")
-            self.calls[call_id] = {"invite": sip, "peer": addr, "answered": True, "to_tag": None}
-            ack_thread = threading.Thread(target=self.wait_for_ack, args=(call_id,), daemon=True)
-            ack_thread.start()
+            self.calls[call_id] = {"invite": sip, "peer": addr, "answered": True}
+            threading.Thread(target=self.wait_for_ack, args=(call_id,), daemon=True).start()
 
         elif start.startswith("ACK"):
             call_id = sip["headers"].get("Call-ID")
             print(f"➡ ACK received for Call-ID {call_id}")
             if call_id in self.calls:
                 self.calls[call_id]["ack"] = True
-                hang_thread = threading.Thread(target=self.hangup_later, args=(call_id,10), daemon=True)
-                hang_thread.start()
+                threading.Thread(target=self.hangup_later, args=(call_id,10), daemon=True).start()
 
         elif start.startswith("BYE"):
             via = sip["headers"].get("Via","")
@@ -230,6 +328,7 @@ class SIPServer:
             print("➡ OPTIONS detected, sending 200 OK...")
             server_ip = self.get_external_ip()
             ok = build_200_ok_options(sip, server_ip)
+            print(f"\n--- Enviando resposta OPTIONS ---\n{ok}\n--- end ---\n")
             self.sock.sendto(ok.encode("utf-8"), addr)
 
         else:
@@ -267,6 +366,7 @@ class SIPServer:
             return ip
         except Exception:
             return "127.0.0.1"
+
 
 if __name__ == "__main__":
     server = SIPServer()
