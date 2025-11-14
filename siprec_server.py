@@ -118,10 +118,8 @@ def build_100_trying(invite):
     return CRLF.join(resp)
 
 
-
-
-def build_200_ok_siprec(invite, server_ip, media_port1=1000, media_port2=1001):
-    """Monta resposta 200 OK com multipart SDP (SIPREC)."""
+def build_200_ok_siprec(invite, server_ip, addr=None, media_port1=10000, media_port2=10000):
+    """Monta resposta 200 OK SIPREC com multipart SDP e headers corretos."""
     hdr = invite["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
@@ -129,9 +127,17 @@ def build_200_ok_siprec(invite, server_ip, media_port1=1000, media_port2=1001):
     call_id = hdr.get("Call-ID", "")
     cseq = hdr.get("CSeq", "")
     contact = hdr.get("Contact", f"<sip:{server_ip}>")
-    to_tag = make_tag()
 
-    boundary = "SIPRECBOUNDARY123"
+    # 🧩 rport/received
+    if "rport" in via:
+        ip, port = addr if addr else ("127.0.0.1", 5060)
+        via = via.replace("rport", f"rport={port};received={ip}")
+
+    # Reordena parâmetros
+    via = reorder_via_params(via)
+
+    # Boundary para multipart
+    boundary = "siprecboundary12345"
 
     # SDP 1
     sdp1 = [
@@ -143,51 +149,57 @@ def build_200_ok_siprec(invite, server_ip, media_port1=1000, media_port2=1001):
         f"m=audio {media_port1} RTP/AVP 0 8",
         "a=rtpmap:0 PCMU/8000",
         "a=rtpmap:8 PCMA/8000",
-        "a=sendrecv"
+        "a=recvonly"
     ]
-    sdp1_body = CRLF.join(sdp1)
 
     # SDP 2
     sdp2 = [
         "v=0",
-        f"o=- {int(time.time())+1} {int(time.time())+1} IN IP4 {server_ip}",
+        f"o=- {int(time.time()) + 1} {int(time.time()) + 1} IN IP4 {server_ip}",
         "s=Stream 2",
         f"c=IN IP4 {server_ip}",
         "t=0 0",
         f"m=audio {media_port2} RTP/AVP 0 8",
         "a=rtpmap:0 PCMU/8000",
         "a=rtpmap:8 PCMA/8000",
-        "a=sendrecv"
+        "a=recvonly"
     ]
-    sdp2_body = CRLF.join(sdp2)
 
     # Multipart body
     multipart_body = CRLF.join([
         f"--{boundary}",
         "Content-Type: application/sdp",
         "",
-        sdp1_body,
+        CRLF.join(sdp1),
         f"--{boundary}",
         "Content-Type: application/sdp",
         "",
-        sdp2_body,
+        CRLF.join(sdp2),
         f"--{boundary}--",
         ""
     ])
 
+    # Resposta SIP
     resp_lines = [
         "SIP/2.0 200 OK",
-        via,
-        from_hdr,
-        f"{to_hdr};tag={to_tag}",
+        f"Via: {via}",
+        f"From: {from_hdr}",
+        f"To: {to_hdr};tag={make_tag()}",
         f"Call-ID: {call_id}",
-        cseq,
+        f"CSeq: {cseq}",
         f"Contact: {contact}",
-        f"Content-Type: multipart/mixed; boundary={boundary}",
+        "Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, NOTIFY, MESSAGE, SUBSCRIBE, INFO",
+        "Accept: application/sdp",
+        "Accept-Encoding: gzip",
+        "Accept-Language: en, pt-BR",
+        "Supported: replaces, timer, 100rel, norefersub",
+        "Server: Python-SIP-Responder/1.0",
+        f"Content-Type: multipart/mixed;boundary={boundary}",
         f"Content-Length: {len(multipart_body.encode('utf-8'))}",
         "",
         multipart_body
     ]
+
     return CRLF.join(resp_lines)
 
 
@@ -231,8 +243,8 @@ def build_200_ok_options(options, server_ip, addr=None):
     return CRLF.join(resp)
 
 
-def build_bye(invite, server_ip):
-    """Monta uma requisição BYE."""
+def build_bye(invite, server_ip, addr=None):
+    """Monta uma requisição BYE válida para o peer do INVITE."""
     hdr = invite["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
@@ -240,19 +252,23 @@ def build_bye(invite, server_ip):
     call_id = hdr.get("Call-ID", "")
     cseq_num = int(hdr.get("CSeq", "1").split()[0])
     cseq = f"{cseq_num + 1} BYE"
+
+    # Usa o endereço real do peer se disponível
+    peer_uri = f"sip:{addr[0]}:{addr[1]}" if addr else "sip:callee@server"
     contact = hdr.get("Contact", f"<sip:{server_ip}>")
 
     resp = [
-        "BYE sip:callee@server SIP/2.0",
-        via,
-        from_hdr,
-        to_hdr,
+        f"BYE {peer_uri} SIP/2.0",
+        f"Via: {via}",
+        f"From: {from_hdr}",
+        f"To: {to_hdr}",
         f"Call-ID: {call_id}",
         f"CSeq: {cseq}",
         f"Contact: {contact}",
         "Content-Length: 0",
         ""
     ]
+
     return CRLF.join(resp)
 
 
@@ -306,23 +322,37 @@ class SIPServer:
                 threading.Thread(target=self.hangup_later, args=(call_id,10), daemon=True).start()
 
         elif start.startswith("BYE"):
-            via = sip["headers"].get("Via","")
-            from_hdr = sip["headers"].get("From","")
-            to_hdr = sip["headers"].get("To","")
-            call_id = sip["headers"].get("Call-ID","")
-            cseq = sip["headers"].get("CSeq","")
+            call_id = sip["headers"].get("Call-ID", "")
+            cseq = sip["headers"].get("CSeq", "")
+            via = sip["headers"].get("Via", "")
+            from_hdr = sip["headers"].get("From", "")
+
+            # O To deve ser o mesmo que o To usado no 200 OK do INVITE
+            # Pegamos do registro da chamada
+            entry = self.calls.get(call_id, {})
+            if entry and "to_tag" in entry:
+                to_hdr = f"{entry['invite']['headers'].get('To', '')};tag={entry['to_tag']}"
+            else:
+                # fallback: se não tiver registro, usa o que veio
+                to_hdr = sip["headers"].get("To", "")
+
             resp = [
                 "SIP/2.0 200 OK",
-                via,
-                from_hdr,
-                to_hdr,
+                f"Via: {via}",
+                f"From: {from_hdr}",
+                f"To: {to_hdr}",
                 f"Call-ID: {call_id}",
                 f"CSeq: {cseq}",
                 "Content-Length: 0",
                 ""
             ]
+
             self.sock.sendto(CRLF.join(resp).encode("utf-8"), addr)
-            print(f"➡ BYE handled for Call-ID {call_id}")
+            print(f"➡ 200 OK for BYE sent (Call-ID {call_id})")
+
+
+
+
 
         elif start.startswith("OPTIONS"):
             print("➡ OPTIONS detected, sending 200 OK...")
