@@ -104,32 +104,24 @@ def build_100_trying(sip, server_ip):
     to_hdr = hdr.get("To", "")
     call_id = hdr.get("Call-ID", "")
     cseq = hdr.get("CSeq", "")
-    contact = hdr.get("Contact", f"<sip:{server_ip}>")
 
-    # 🧩 rport/received
+    # Ajustar rport
     if "rport" in via:
-        ip, port = addr if addr else ("127.0.0.1", 5060)
-        via = via.replace("rport", f"rport={port};received={ip}")
+        via = via.replace("rport", f"rport={5060};received={server_ip}")
 
-    # Reordena parâmetros
-    via = reorder_via_params(via)
-
-    # Resposta SIP
     resp = [
-        "SIP / 2.0 100 Trying",
+        "SIP/2.0 100 Trying",
+        f"Via: {via}",
         f"From: {from_hdr}",
-        f"To: {to_hdr};tag={make_tag()}",
+        f"To: {to_hdr}",
         f"Call-ID: {call_id}",
         f"CSeq: {cseq}",
-        f"Via: {via}",
-        f"Supported: timer,siprec",
-        f"Contact: {contact}",
         "Content-Length: 0",
         ""
     ]
 
-    response = CRLF.join(resp)
-    return response + CRLF
+    return CRLF.join(resp) + CRLF
+
 
 
 def build_200_ok_siprec(invite, server_ip, addr=None, media_port1=10000, media_port2=10000):
