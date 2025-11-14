@@ -97,25 +97,39 @@ def reorder_via_params(via_line):
 # -----------------------------------------------------------
 
 
-def build_100_trying(invite):
-    hdr = invite["headers"]
+def build_100_trying(sip, server_ip):
+    hdr = sip["headers"]
     via = hdr.get("Via", "")
     from_hdr = hdr.get("From", "")
     to_hdr = hdr.get("To", "")
     call_id = hdr.get("Call-ID", "")
     cseq = hdr.get("CSeq", "")
+    contact = hdr.get("Contact", f"<sip:{server_ip}>")
 
+    # 🧩 rport/received
+    if "rport" in via:
+        ip, port = addr if addr else ("127.0.0.1", 5060)
+        via = via.replace("rport", f"rport={port};received={ip}")
+
+    # Reordena parâmetros
+    via = reorder_via_params(via)
+
+    # Resposta SIP
     resp = [
-        "SIP/2.0 100 Trying",
-        f"Via: {via}",
+        "SIP / 2.0 100 Trying",
         f"From: {from_hdr}",
-        f"To: {to_hdr}",
+        f"To: {to_hdr};tag={make_tag()}",
         f"Call-ID: {call_id}",
         f"CSeq: {cseq}",
+        f"Via: {via}",
+        f"Supported: timer,siprec",
+        f"Contact: {contact}",
         "Content-Length: 0",
         ""
     ]
-    return CRLF.join(resp)
+
+    response = CRLF.join(resp)
+    return response + CRLF
 
 
 def build_200_ok_siprec(invite, server_ip, addr=None, media_port1=10000, media_port2=10000):
@@ -154,11 +168,6 @@ def build_200_ok_siprec(invite, server_ip, addr=None, media_port1=10000, media_p
 
     # SDP 2
     sdp2 = [
-        "v=0",
-        f"o=- {int(time.time()) + 1} {int(time.time()) + 1} IN IP4 {server_ip}",
-        "s=Stream 2",
-        f"c=IN IP4 {server_ip}",
-        "t=0 0",
         f"m=audio {media_port2} RTP/AVP 0 8",
         "a=rtpmap:0 PCMU/8000",
         "a=rtpmap:8 PCMA/8000",
@@ -167,40 +176,32 @@ def build_200_ok_siprec(invite, server_ip, addr=None, media_port1=10000, media_p
 
     # Multipart body
     multipart_body = CRLF.join([
-        f"--{boundary}",
-        "Content-Type: application/sdp",
-        "",
+
         CRLF.join(sdp1),
-        f"--{boundary}",
-        "Content-Type: application/sdp",
-        "",
+
         CRLF.join(sdp2),
-        f"--{boundary}--",
-        ""
+
     ])
 
     # Resposta SIP
-    resp_lines = [
+    resp = [
         "SIP/2.0 200 OK",
-        f"Via: {via}",
         f"From: {from_hdr}",
         f"To: {to_hdr};tag={make_tag()}",
         f"Call-ID: {call_id}",
         f"CSeq: {cseq}",
+        f"Via: {via}",
+        f"Supported: timer,siprec",
         f"Contact: {contact}",
-        "Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, NOTIFY, MESSAGE, SUBSCRIBE, INFO",
-        "Accept: application/sdp",
-        "Accept-Encoding: gzip",
-        "Accept-Language: en, pt-BR",
-        "Supported: replaces, timer, 100rel, norefersub",
-        "Server: Python-SIP-Responder/1.0",
-        f"Content-Type: multipart/mixed;boundary={boundary}",
+        "Session-Expires: 1800;refresher=uas",
+        f"Content-Type: application/sdp",
         f"Content-Length: {len(multipart_body.encode('utf-8'))}",
         "",
         multipart_body
     ]
 
-    return CRLF.join(resp_lines)
+    response = CRLF.join(resp)
+    return response + CRLF
 
 
 def build_200_ok_options(options, server_ip, addr=None):
@@ -240,7 +241,8 @@ def build_200_ok_options(options, server_ip, addr=None):
         "Content-Length: 0",
         ""
     ]
-    return CRLF.join(resp)
+    response = CRLF.join(resp)
+    return response + CRLF
 
 
 def build_bye(invite, server_ip, addr=None):
@@ -269,7 +271,8 @@ def build_bye(invite, server_ip, addr=None):
         ""
     ]
 
-    return CRLF.join(resp)
+    response = CRLF.join(resp)
+    return response + CRLF
 
 
 # -----------------------------------------------------------
@@ -301,7 +304,7 @@ class SIPServer:
             server_ip = self.get_external_ip()
 
             # ✅ Envia 100 Trying primeiro
-            trying = build_100_trying(sip)
+            trying = build_100_trying(sip,server_ip)
             self.sock.sendto(trying.encode("utf-8"), addr)
             print(f"\n--- Enviando 100 Trying ---\n{trying}\n--- end ---\n")
 
