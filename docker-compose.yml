@@ -1,10 +1,15 @@
 version: "3.9"
+
 services:
-  sip-server:
-    build: .
-    container_name: sip_udp_answer
-    restart: unless-stopped
-    network_mode: "host"  # importante para UDP SIP (evita NAT)
+  ffmpeg:
+    image: lscr.io/linuxserver/ffmpeg:latest
+    container_name: ffmpeg
+    stdin_open: true       # mantém STDIN aberto
+    tty: true              # aloca um pseudo-TTY
+    command: /bin/bash     # força iniciar no bash
     volumes:
-      - .:/app
-    command: ["python3", "sip_udp_answer.py"]
+      - ./config:/config   # monta diretório local (ajuste conforme necessário)
+    environment:
+      - PUID=1000          # ajuste para seu usuário
+      - PGID=1000          # ajuste para seu grupo
+    restart: unless-stopped
