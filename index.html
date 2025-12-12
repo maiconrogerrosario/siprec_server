@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Ramal 5000</title>
+
+  <!-- Carregar SIP.js (caminho estático) -->
+  <script src="{{ url_for('static', filename='js/lib/sip-0.21.2.js') }}"></script>
+
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    button { margin: 5px; }
+    #logs { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 10px; }
+  </style>
+</head>
+<body>
+  <h2>Ramal 5000</h2>
+
+  <label>Destino: <input type="text" id="destination" value="5001"></label>
+  <button id="callBtn">Ligar</button>
+  <button id="hangupBtn" disabled>Desligar</button>
+  <audio id="remoteAudio" autoplay></audio>
+
+  <div id="logs"></div>
+
+  <script>
+    const logs = document.getElementById("logs");
+    function log(msg) {
+      console.log(msg);
+      logs.innerHTML += msg + "<br>";
+    }
+
+    // Configurações do ramal
+    const myRamal = "5000";
+    const mySenha = "Senha5000";
+    const servidor = "56.125.214.225";
+
+    const myURI = SIP.UserAgent.makeURI(`sip:${myRamal}@${servidor}`);
+
+    // User Agent com ICE servers
+    const userAgent = new SIP.UserAgent({
+      uri: myURI,
+      authorizationUsername: myRamal,
+      authorizationPassword: mySenha,
+      transportOptions: { server: `ws://${servidor}:8088/ws`, traceSip: true },
+      delegate: { onInvite: handleIncomingCall },
+
+    });
+
+    const registerer = new SIP.Registerer(userAgent);
+    let currentSession = null;
+    const remoteAudio = document.getElementById("remoteAudio");
+
+    // Stream local persistente
+    let localStream = null;
+    async function getLocalStream() {
+      if (!localStream) {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (err) {
+          alert("Microfone necessário!");
+          return null;
+        }
+      }
+      return localStream;
+    }
+
+    function setupRemoteMedia(session) {
+      const remoteStream = new MediaStream();
+      session.sessionDescriptionHandler.peerConnection.getReceivers().forEach(receiver => {
+        if (receiver.track) remoteStream.addTrack(receiver.track);
+      });
+      remoteAudio.srcObject = remoteStream;
+    }
+
+    function cleanupMedia() {
+      remoteAudio.srcObject = null;
+    }
+
+    // Iniciar User Agent e registrar
+    userAgent.start().then(() => {
+      log("User Agent conectado!");
+      registerer.register();
+    }).catch(err => log("Erro ao conectar: " + err));
+
+    // Fazer chamada
+    async function makeCall() {
+      const destino = document.getElementById("destination").value;
+      const targetURI = SIP.UserAgent.makeURI(`sip:${destino}@${servidor}`);
+      const stream = await getLocalStream();
+      if (!stream) return;
+
+      const inviter = new SIP.Inviter(userAgent, targetURI, {
+        sessionDescriptionHandlerOptions: { localMediaStream: stream }
+      });
+
+      inviter.stateChange.addListener(state => {
+        log("Estado da chamada: " + state);
+        updateButtons(state);
+
+        if (state === SIP.SessionState.Established) setupRemoteMedia(inviter);
+        if (state === SIP.SessionState.Terminated) cleanupMedia();
+      });
+
+      inviter.invite();
+      currentSession = inviter;
+    }
+
+    // Receber chamada
+    async function handleIncomingCall(invitation) {
+      log("Chamada recebida de " + invitation.remoteIdentity.uri.toString());
+      const stream = await getLocalStream();
+
+      invitation.stateChange.addListener(state => {
+        log("Estado da chamada: " + state);
+        updateButtons(state);
+
+        if (state === SIP.SessionState.Established) setupRemoteMedia(invitation);
+        if (state === SIP.SessionState.Terminated) cleanupMedia();
+      });
+
+      invitation.accept({ sessionDescriptionHandlerOptions: { localMediaStream: stream } });
+      currentSession = invitation;
+    }
+
+    // Encerrar chamada
+    function endCall() {
+      if (!currentSession) return;
+      switch(currentSession.state) {
+        case SIP.SessionState.Initial:
+        case SIP.SessionState.Establishing:
+          if (currentSession instanceof SIP.Inviter) currentSession.cancel();
+          else currentSession.reject();
+          break;
+        case SIP.SessionState.Established:
+          currentSession.bye();
+          break;
+      }
+    }
+
+    // Atualizar estado dos botões
+    function updateButtons(state) {
+      document.getElementById("callBtn").disabled = state !== SIP.SessionState.Terminated;
+      document.getElementById("hangupBtn").disabled = state === SIP.SessionState.Terminated;
+    }
+
+    // Botões
+    document.getElementById("callBtn").addEventListener("click", makeCall);
+    document.getElementById("hangupBtn").addEventListener("click", endCall);
+
+  </script>
+</body>
+</html>
